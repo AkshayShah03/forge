@@ -1,0 +1,46 @@
+# Multi-Agent Orchestration System — Azure edition
+# Only the queue/secrets clients change vs the AWS version
+
+# LangGraph ecosystem (unchanged)
+langgraph==0.6.11
+langgraph-checkpoint-postgres==2.0.25
+langgraph-prebuilt==0.6.5
+langchain-core==0.3.86
+langchain-groq==0.3.8
+langchain-ollama==0.3.10
+langchain-mcp-adapters==0.1.12
+langchain-community==0.3.31
+
+# Web framework (unchanged)
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# Database (unchanged)
+asyncpg==0.29.0
+psycopg[binary]==3.2.1
+
+# ── AWS removed ──────────────────────────────────────────────────────────────
+# boto3             ← REMOVED: replaced by azure-servicebus + azure-identity
+
+# ── Azure added ──────────────────────────────────────────────────────────────
+azure-servicebus==7.12.2        # Service Bus SDK (replaces boto3 SQS)
+azure-identity==1.16.0          # DefaultAzureCredential (replaces IAM roles)
+azure-keyvault-secrets==4.8.0   # Key Vault secrets client (optional — Container Apps injects them)
+
+# Search (unchanged)
+tavily-python==0.3.9
+
+# Observability (unchanged)
+agentops==0.3.18
+opentelemetry-sdk==1.24.0
+opentelemetry-instrumentation-fastapi==0.45b0
+applicationinsights==0.11.10    # Azure Application Insights (replaces CloudWatch)
+
+# Testing (unchanged)
+pytest==8.2.0
+pytest-asyncio==0.23.7
+pytest-timeout==2.3.1
+httpx>=0.27.0
+
+# Dev tools
+python-dotenv==1.0.1

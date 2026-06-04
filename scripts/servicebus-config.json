@@ -1,0 +1,29 @@
+{
+  "UserConfig": {
+    "Namespaces": [
+      {
+        "Name": "local-namespace",
+        "Queues": [
+          {
+            "Name": "task-inbox",
+            "Properties": {
+              "RequiresSession": true,
+              "MaxDeliveryCount": 3,
+              "LockDuration": "PT5M",
+              "DefaultMessageTimeToLive": "P1D"
+            }
+          },
+          {
+            "Name": "result-outbox",
+            "Properties": {
+              "RequiresSession": true,
+              "MaxDeliveryCount": 5,
+              "LockDuration": "PT30S",
+              "DefaultMessageTimeToLive": "PT1H"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

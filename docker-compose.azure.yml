@@ -1,0 +1,95 @@
+version: "3.9"
+
+# ============================================================
+# Multi-Agent System — Local Azure Dev Stack
+# ============================================================
+# Start:       docker compose -f docker-compose.azure.yml up --build
+# API:         http://localhost:8000/docs
+# Azurite UI:  http://localhost:10000 (Service Bus emulator)
+
+x-env: &common-env
+  POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/agents
+  # Azurite connection string for local Service Bus emulation
+  # In Container Apps, this is replaced by managed identity + real namespace
+  AZURE_SERVICE_BUS_NAMESPACE: ""       # left empty → uses connection string below
+  AZURE_SERVICEBUS_CONNECTION_STRING: "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+  AZURE_TASK_QUEUE_NAME:   task-inbox
+  AZURE_RESULT_QUEUE_NAME: result-outbox
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  TAVILY_API_KEY:    "${TAVILY_API_KEY:-}"
+  PYTHONUNBUFFERED: "1"
+  ENV: development
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       agents
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # Azure Service Bus emulator
+  # NOTE: Azure's official Service Bus emulator requires Docker Desktop.
+  # For CI / Linux: use the open-source 'azure-service-bus-emulator' container.
+  servicebus-emulator:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      SQL_SERVER: mssql
+      MSSQL_SA_PASSWORD: "Passw0rd!"
+    ports:
+      - "5672:5672"    # AMQP
+      - "9354:9354"    # management
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - ./scripts/servicebus-config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Passw0rd!"
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P "Passw0rd!" -Q "SELECT 1"
+      interval: 10s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn api.azure_main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      <<: *common-env
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m worker.servicebus_worker
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+volumes:
+  postgres-data:
