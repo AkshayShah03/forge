@@ -10,8 +10,8 @@ from langchain_core.tools import tool
 AGENT_TOOL_SCOPES: dict[str, list[str]] = {
     "orchestrator": ["web_search"],
     "researcher":   ["web_search", "rag_retrieval", "read_file"],
-    "coder":        ["execute_python", "read_file", "write_file"],
-    "analyst":      ["run_sql_query", "execute_python", "rag_retrieval"],
+    "coder":        ["execute_python", "read_file", "write_file", "read_log_file", "list_log_files", "query_git_log"],
+    "analyst":      ["run_sql_query", "execute_python", "rag_retrieval", "read_log_file"],
     "critic":       [],
 }
 
@@ -71,6 +71,69 @@ async def write_file(path: str, content: str) -> str:
 
 
 @tool
+async def read_log_file(path: str, tail_lines: int = 500, pattern: str = "") -> str:
+    """Read a log file from an absolute path, optionally filtered by a regex pattern. Returns last N lines."""
+    import re as _re
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.readlines()
+        if pattern:
+            regex = _re.compile(pattern, _re.IGNORECASE)
+            lines = [l for l in lines if regex.search(l)]
+        lines = lines[-tail_lines:]
+        return f"Showing {len(lines)} lines from {path}:\n" + "".join(lines)
+    except FileNotFoundError:
+        return f"Log file not found: {path}"
+    except Exception as e:
+        return f"Error reading log file: {e}"
+
+
+@tool
+async def list_log_files(path: str) -> str:
+    """Recursively list log and config files in a directory (.log, .txt, .json, .yaml)."""
+    import os as _os
+    exts = (".log", ".txt", ".json", ".yaml", ".yml")
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+    files = []
+    try:
+        if not _os.path.exists(path):
+            return f"Error: path does not exist: {path}"
+        for root, dirs, filenames in _os.walk(path):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for fn in filenames:
+                if fn.endswith(exts):
+                    files.append(_os.path.join(root, fn))
+        if not files:
+            return f"No log/config files found in {path}"
+        return f"Found {len(files)} files:\n" + "\n".join(files[:100])
+    except Exception as e:
+        return f"Error listing directory: {e}"
+
+
+@tool
+async def query_git_log(repo_path: str, since_hours: int = 24) -> str:
+    """Get recent git commits for a repository to correlate with incident timing."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", repo_path, "log",
+            f"--since={since_hours} hours ago",
+            "--format=%h|%ae|%ad|%s",
+            "--date=iso-strict",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        output = stdout.decode().strip()
+        if not output:
+            return f"No commits in the last {since_hours} hours in {repo_path}"
+        return f"Recent commits (last {since_hours}h):\n{output[:3000]}"
+    except asyncio.TimeoutError:
+        return "git log timed out"
+    except Exception as e:
+        return f"git log failed: {e}"
+
+
+@tool
 async def rag_retrieval(query: str) -> str:
     """Retrieve relevant documents from the RAG service."""
     rag_url = os.getenv("RAG_SERVICE_URL", "")
@@ -113,6 +176,9 @@ _ALL_TOOLS = {
     "execute_python": execute_python,
     "read_file":      read_file,
     "write_file":     write_file,
+    "read_log_file":  read_log_file,
+    "list_log_files": list_log_files,
+    "query_git_log":  query_git_log,
     "rag_retrieval":  rag_retrieval,
     "run_sql_query":  run_sql_query,
 }

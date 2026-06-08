@@ -188,12 +188,28 @@ class TestToolRegistry:
         assert set(AGENT_TOOL_SCOPES["researcher"]) == {"web_search", "rag_retrieval", "read_file"}
 
     def test_coder_scope(self):
-        """Coder scope contains execute_python, read_file, write_file."""
-        assert set(AGENT_TOOL_SCOPES["coder"]) == {"execute_python", "read_file", "write_file"}
+        """Coder scope contains execute_python, read_file, write_file, and incident tools."""
+        assert set(AGENT_TOOL_SCOPES["coder"]) == {
+            "execute_python", "read_file", "write_file",
+            "read_log_file", "list_log_files", "query_git_log",
+        }
+
+    def test_analyst_scope(self):
+        """Analyst scope contains run_sql_query, execute_python, rag_retrieval, read_log_file."""
+        assert set(AGENT_TOOL_SCOPES["analyst"]) == {
+            "run_sql_query", "execute_python", "rag_retrieval", "read_log_file",
+        }
 
     def test_critic_has_no_tools(self):
         """Critic has an empty tool scope."""
         assert AGENT_TOOL_SCOPES["critic"] == []
+
+    def test_all_scoped_tools_exist_in_registry(self):
+        """Every tool name in AGENT_TOOL_SCOPES resolves to a callable in _ALL_TOOLS."""
+        from agent_system.tools.registry import _ALL_TOOLS
+        for role, names in AGENT_TOOL_SCOPES.items():
+            for name in names:
+                assert name in _ALL_TOOLS, f"Tool '{name}' in scope for '{role}' is not registered in _ALL_TOOLS"
 
 
 class TestGraphTopology:

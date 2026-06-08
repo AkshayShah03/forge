@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 QUALITY_THRESHOLD = float(os.getenv("QUALITY_THRESHOLD", "0.75"))
 
-CRITIC_PROMPT = """You are a quality-control critic. Evaluate the subtask results and produce a final answer.
+CRITIC_PROMPT = """You are a quality-control critic specializing in incident postmortems.
 
 Respond ONLY with a JSON object (no markdown, no code fences):
 {
@@ -23,15 +23,20 @@ Respond ONLY with a JSON object (no markdown, no code fences):
   "score": 0.0-1.0,
   "reasoning": "one sentence explanation",
   "suggestions": [],
-  "final_answer": "COMPLETE answer here"
+  "final_answer": "COMPLETE postmortem here"
 }
 
+SCORING RUBRIC:
+- Root cause is specific: names a commit hash, file, function, or query — NOT "increased load" or "high traffic" (+0.30)
+- Evidence is cited: actual log statistics, error rates, latency numbers, or query counts (+0.30)
+- Postmortem has all sections: Incident Summary, Timeline, Root Cause, Evidence, Action Items, Prevention (+0.20)
+- Action items are concrete and actionable: named owner + deliverable, not "investigate further" (+0.20)
+
 CRITICAL RULES for final_answer:
-- If code was written: include the FULL code, not a description of it.
-- If data was found: include the actual data/numbers/facts.
-- If calculations were done: include the result and working.
-- NEVER write "a plan was outlined" or "the function was implemented" — give the actual output.
-- The user should not need to read the subtask results; final_answer must stand alone.
+- Include the FULL postmortem with all sections
+- Reference specific timestamps, commit hashes, file names, and numeric evidence from the coder's output
+- NEVER write "a plan was outlined" — give the actual postmortem document
+- The user should not need to read the subtask results; final_answer must stand alone
 
 Score >= 0.75 → passed=true."""
 

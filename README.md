@@ -1,140 +1,155 @@
 # Forge
 
-**Multi-agent task orchestration. Give it a goal — a team of AI specialists plans, executes, and retries until the quality passes.**
+**An incident response system powered by a team of AI agents. Give it an alert and a log path. It investigates, finds the root cause, and drafts the postmortem.**
 
 ---
 
-## Why I built this
+## What it actually does
 
-Every complex task I tried to automate with a single LLM call failed the same way: the model would either skip steps, hallucinate a detail it couldn't verify, or produce code that looked right but didn't run. The problem isn't the model — it's that complex tasks need different skills at different stages, sequentially, with each stage building on the last.
+When a production alert fires, the usual process is: someone wakes up, SSHes into a box, scrolls through logs, checks recent deploys, forms a hypothesis, validates it, then spends another hour writing a postmortem. That process is mostly mechanical. The interesting part is the judgment call at the end.
 
-I wanted something where I could say *"find the top 5 cloud providers by revenue, compare their AI services, and write a Python script that fetches their current stock prices"* and have it actually work end-to-end — not with hand-holding, not with retrying manually, but with the system knowing when its own output isn't good enough.
+Forge handles the mechanical part. You describe the incident (what broke, when, where the logs are, what service is affected) and the system spins up three agents that run in parallel:
 
-That meant building routing (which specialist handles which step), dependency tracking (step B can't start until step A is verified), quality scoring (is this actually correct?), and automatic retry (if it isn't, re-plan with the feedback). Not a chatbot. Infrastructure.
+* A **researcher** searches for known failure patterns and runbook guidance for the alert type
+* A **coder** reads the log files, computes latency percentiles, counts DB queries per request, and queries the git history for deploys that correlate with the anomaly onset
+* An **analyst** receives both sets of findings, ranks root cause hypotheses by confidence, and drafts a structured postmortem
+
+The postmortem goes through a critic agent that scores it against a rubric: is the root cause specific (a commit hash, a file, a query)? Is the evidence cited (actual numbers from the logs)? If the score is below the threshold, the orchestrator re-plans with the feedback and runs again.
+
+The output is a postmortem you can actually use, not a summary that says "increased latency was observed."
 
 ---
 
-## What it does
-
-You submit a task. Forge breaks it down and runs it through a pipeline:
+## Architecture
 
 ```
-Your goal
-    │
-    ▼
-┌─────────────────┐
-│  Orchestrator   │  Plans 1–3 subtasks, assigns each to a specialist
-└────────┬────────┘
-         │
-    ┌────┴─────────────────────┐
-    │                          │
-    ▼                          ▼
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ Researcher│  │  Coder   │  │ Analyst  │
-│web search │  │ executes │  │SQL/stats │
-│doc lookup │  │  Python  │  │ execute  │
-└────┬──────┘  └────┬─────┘  └────┬─────┘
-     └──────────────┴──────────────┘
-                    │
-                    ▼
-           ┌────────────────┐
-           │     Critic     │  Scores 0–1. Below 0.75? Orchestrator
-           │  quality gate  │  re-plans with the feedback.
-           └────────┬───────┘
-                    │
-              passed? ──yes──▶  Final answer
-                    │
-                   no
-                    │
-              max iterations? ──yes──▶  Best attempt
-                    │
-                   no
-                    │
-              back to Orchestrator
+Incident description (what broke, log path, repo path)
+    |
+    v
+Orchestrator  —  plans the investigation into 3 subtasks
+    |
+    +——— Researcher  (web search for known causes + runbook patterns)
+    |
+    +——— Coder  (reads logs, parses latency stats, queries git history)
+    |
+    v  (analyst waits for both above to finish)
+    Analyst  (correlates findings, ranks hypotheses, writes postmortem)
+    |
+    v
+Critic  (scores on specificity + evidence + completeness)
+    |
+    +——— score < 0.75: re-plan and retry (up to 3 iterations)
+    |
+    +——— score >= 0.75: return final postmortem
 ```
 
-Every node writes its state to a checkpoint before moving on. If the process crashes mid-task, it resumes from where it stopped — not from the beginning.
-
----
-
-## Architecture decisions worth explaining
-
-**Why LangGraph instead of a simple loop?**
-
-A loop would work for the happy path. LangGraph gives me a compiled state machine with typed reducers — the graph topology is explicit, routing is pure functions I can unit test with plain dicts, and checkpointing is built in. When I add a new agent type, I add a node and an edge. I don't touch the routing logic for existing agents.
-
-**Why Azure Service Bus with sessions?**
-
-Sessions enforce FIFO per `session_id`. I use `user_id` as the session key. That means all tasks from one user run in submission order — user A's long-running task doesn't block user B, but user A's tasks always complete in sequence. SQS FIFO queues do the same thing with `MessageGroupId`. The semantics are identical; I'm on Azure.
-
-**Why a critic agent instead of just checking the output in code?**
-
-A rule-based quality check would need to know what "good" looks like for every possible task type. The critic doesn't — it reads the task, reads the outputs, and scores them the same way a human would review work. It also generates the feedback that drives the retry: *"the code runs but doesn't handle edge cases"* is more useful than *"score: 0.4"*.
-
-**Why not just use Claude / GPT-4 and skip the complexity?**
-
-The whole system runs on open weights models via Ollama (local) or Groq (cloud free tier). No per-token cost at inference time, no vendor lock-in on the model layer. The orchestration patterns — checkpointing, retry loops, quality gates, message queues — work identically regardless of which model is behind `get_llm()`. Swapping providers is one env var.
-
-**Why does the lock renewal loop exist?**
-
-Service Bus message locks expire after 60 seconds by default. Agent tasks can take 10+ minutes. Without the heartbeat, the lock expires mid-task, the message becomes available again, a second worker picks it up, and you get duplicate processing. The lock renewal loop wakes every 50 seconds and extends the lease. It's the Azure equivalent of SQS's `change_message_visibility`.
-
----
-
-## Stack
-
-| Layer | Technology | Why |
-|---|---|---|
-| Agent graph | LangGraph 0.6 | State machines, typed reducers, built-in checkpointing |
-| LLM (cloud) | Groq + Llama 3.3 70B | 300+ tokens/sec, free tier, tool calling that works |
-| LLM (local) | Ollama + qwen2.5:3b | No API key needed for dev, full offline capability |
-| Checkpoint store | PostgreSQL (AsyncPostgresSaver) | Crash recovery, task history, resume from any node |
-| Task queue | Azure Service Bus (sessions) | FIFO per user, at-least-once delivery, dead-letter on failure |
-| API | FastAPI + SSE | Real-time agent progress without websocket complexity |
-| Infra | Terraform + Azure Container Apps | Serverless scaling, managed identity (no credential files) |
-
----
-
-## What it actually looks like
-
-The browser UI at `localhost:8000` shows agent steps as they happen via Server-Sent Events:
-
-- Submit a task
-- Watch the orchestrator plan subtasks in real time
-- See each specialist complete its work
-- Critic score + final answer when done
-
-The "Agent outputs" section shows what each agent actually produced — not a summary, the raw output. If the coder wrote Python, you see the code. If the researcher found data, you see the data.
+Every agent node writes its state to a checkpoint before it hands off to the next. If the process crashes mid-investigation, it resumes from where it stopped.
 
 ---
 
 ## Quick start
 
-**With Groq (cloud, fastest):**
+You need either a Groq API key (free at console.groq.com) or Ollama running locally. No other external services are required.
+
+**With Groq:**
+
 ```bash
 git clone https://github.com/AkshayShah03/forge
 cd forge
 uv venv .venv --python 3.11 && uv pip install -r requirements-azure.txt
 GROQ_API_KEY=your_key PYTHONPATH=. .venv/bin/uvicorn api.azure_main:app --reload
-# open http://localhost:8000
 ```
 
-**With Ollama (local, no API key):**
+Open `http://localhost:8000`. The UI has pre-filled example incidents to try immediately.
+
+**With Ollama (no API key needed):**
+
 ```bash
 ollama pull qwen2.5:3b
-OLLAMA_MODEL=qwen2.5:3b PYTHONPATH=. .venv/bin/uvicorn api.azure_main:app --reload
+PYTHONPATH=. .venv/bin/uvicorn api.azure_main:app --reload
 ```
+
+Note: smaller models (3B) work for straightforward incidents but struggle with multi-step tool use. `llama3.1:8b` or larger gives much better results.
+
+---
+
+## How to use it
+
+The system works best when you give it specifics. Instead of "our API is slow," try:
+
+```
+P95 latency in checkout-service jumped from 45ms to 385ms at 2026-06-08T14:32Z.
+A deploy (v2.4.1) finished at 14:02. Logs are at /var/log/checkout/.
+The repo is at /home/app/checkout-service. Investigate and write a postmortem.
+```
+
+The coder agent will find the log files, compute the latency stats, and check what changed in the repo around that time. The analyst matches the anomaly timestamp to the deploy window and tries to identify the specific commit or code change responsible.
+
+You can also run the pre-built demo that generates synthetic logs and submits a realistic incident:
+
+```bash
+python scripts/demo_incident.py
+```
+
+This creates log files in `/tmp/forge-demo/logs/` with a simulated N+1 query regression (DB queries per request jumping from 2 to 23 at a known timestamp) and an accompanying deploy log. The system investigates it without any further setup.
+
+---
+
+## Tech decisions
+
+**LangGraph instead of a loop.** A plain async loop would handle the happy path fine. LangGraph gives compiled state machines with typed reducers, which means routing functions are pure and testable with plain dicts. When the critic fails a result and routes back to the orchestrator, that path is explicit in the graph, not an `if/else` buried in a loop body.
+
+**Dependency tracking.** The analyst depends on both the researcher and the coder. The orchestrator tracks this by checking which subtasks are in `subtask_results` before it routes to the next agent. The researcher and coder run sequentially in the current implementation (parallel execution is on the list), but the dependency contract means they can be parallelized without changing the analyst or critic code.
+
+**Critic as quality gate.** A rule-based check can tell you whether the output is well-formed JSON. It cannot tell you whether "the root cause was high traffic" is a useful postmortem or not. The critic reads the original incident description and the full agent output and scores it the same way a senior engineer would review a draft. The feedback it generates ("root cause too vague, no commit hash cited") drives the retry in a way that a numeric score alone cannot.
+
+**Azure Service Bus with sessions.** FIFO per `user_id`. If you submit multiple incidents, they run in submission order without blocking other users. The worker renews the Service Bus message lock every 50 seconds because agent runs take longer than the default 60-second lock timeout. Without this, the message re-enters the queue and a second worker picks it up mid-run.
+
+---
+
+## Tools available to each agent
+
+| Agent | Tools |
+|---|---|
+| Orchestrator | web search |
+| Researcher | web search, RAG retrieval, file read |
+| Coder | Python execution, file read/write, log file reader, directory listing, git log query |
+| Analyst | SQL query, Python execution, RAG retrieval, log file reader |
+| Critic | none (pure LLM evaluation) |
+
+The tool scopes are enforced in `agent_system/tools/registry.py`. Adding a new tool means adding a function and listing it in the scope for the roles that should have it.
 
 ---
 
 ## Running the tests
 
 ```bash
-pytest tests/ -v --tb=short   # 45 tests, ~4 seconds
-python scripts/smoke_test.py  # end-to-end with mocked LLM
+.venv/bin/python -m pytest tests/ -v --tb=short
 ```
 
-The routing functions are pure — they take a state dict and return a string. No mocks needed, no running LLM. The integration tests use a `FakeChatModel` that returns preset responses so the full graph runs without hitting any API.
+93 tests, all under a second. Routing functions are pure so no mocks needed for unit tests. Integration tests use a `FakeChatModel` with preset responses, so the full graph runs without hitting any API.
+
+The test suite covers:
+
+* All routing logic (orchestrator, subagents, critic, retry loop)
+* The three new tools (`read_log_file`, `list_log_files`, `query_git_log`) including edge cases like nonexistent paths and zero-hour git windows
+* JSON parsing resilience for orchestrator and critic outputs (markdown fences, embedded JSON, malformed responses)
+* The full 3-agent incident workflow end to end
+* Dependency blocking and unblocking (analyst waits for both researcher and coder)
+* API endpoints (submit, poll, SSE stream, history)
+* Service Bus worker (message parsing, lock renewal, dead-letter on max delivery count)
+
+---
+
+## Limitations
+
+The web search tool requires a Tavily API key. Without one, the researcher falls back to the model's training knowledge, which works well for common failure patterns (N+1 queries, GC pressure, lock contention) but not for service-specific or recent issues.
+
+The critic adds roughly one extra LLM call per iteration. For incidents where you trust the first pass, set `max_iterations=1`.
+
+By default (no `POSTGRES_URL`), the system uses in-memory checkpointing. Task history is lost on restart. Set `POSTGRES_URL` to a PostgreSQL instance to persist across restarts.
+
+The `query_git_log` tool reads from a local git repository. If the service repo is on a remote or only accessible via an API, you would need to add a tool that fetches commit history from GitHub or GitLab instead.
 
 ---
 
@@ -147,28 +162,9 @@ cd infra/azure/terraform
 terraform init && terraform apply
 ```
 
-This creates: Container Apps (API + worker), Service Bus Premium namespace with sessions, PostgreSQL Flexible Server, Key Vault for secrets. GitHub Actions deploys on push to `main`.
+This creates Container Apps for the API and worker, a Service Bus Premium namespace (required for session support), PostgreSQL Flexible Server for checkpoints, and Key Vault for secrets. GitHub Actions deploys on push to main.
 
-The worker scales horizontally — each replica accepts a different user session, so concurrent users don't block each other. The API is stateless; it just enqueues to Service Bus and reads checkpoints from Postgres.
-
-Cost on Azure: ~$700/month for one messaging unit (Service Bus Premium requires it for sessions) + Container Apps + Postgres. Not for hobby use.
-
----
-
-## Honest limitations
-
-- **No real web search without a Tavily key** — the `web_search` tool returns an error if `TAVILY_API_KEY` isn't set. Agents fall back to model knowledge, which works for well-known facts and fails on recent events.
-- **3B models struggle with tool calling** — `qwen2.5:3b` works for straightforward tasks; anything with complex tool use needs at least 7B. `llama-3.1-8b-instant` on Groq hallucinates tool names. `llama-3.3-70b-versatile` is reliable.
-- **Critic adds ~30% latency** — it's an extra LLM call per iteration. For tasks where you trust the first answer, set `max_iterations=1`.
-- **MemorySaver is not durable** — the default (no `POSTGRES_URL`) keeps checkpoints in RAM. Restart the server and task history is gone.
-
----
-
-## What I'd build next
-
-- **Streaming agent outputs to the UI in real time** — right now you see the log steps but the actual text appears only when the subtask finishes. SSE from within the ReAct loop would show token-by-token output.
-- **Tool result caching** — if the researcher looks up the same fact twice across retries, it shouldn't hit the API twice.
-- **A proper task queue UI** — the current UI is for submitting and watching one task. A dashboard showing all tasks, their statuses, and the ability to kill a runaway task.
+The worker scales horizontally. Each replica takes a different user session so concurrent incidents do not block each other. Cost is around $700/month primarily because Service Bus Premium requires one messaging unit to enable sessions.
 
 ---
 
@@ -178,25 +174,26 @@ Cost on Azure: ~$700/month for one messaging unit (Service Bus Premium requires 
 forge/
 ├── agent_system/
 │   ├── agents/
-│   │   ├── orchestrator.py   # plans subtasks, routes to specialists
-│   │   ├── sub_agents.py     # researcher, coder, analyst
-│   │   └── critic.py         # quality gate, drives retry
+│   │   ├── orchestrator.py     plans subtasks, tracks dependencies
+│   │   ├── sub_agents.py       researcher, coder, analyst with role-specific prompts
+│   │   └── critic.py           quality scoring, drives retry
 │   ├── graph/
-│   │   └── builder.py        # StateGraph assembly, AgentGraphFactory
+│   │   └── builder.py          LangGraph StateGraph, AgentGraphFactory
 │   ├── state/
-│   │   └── schema.py         # AgentState TypedDict, reducers
+│   │   └── schema.py           AgentState TypedDict, initial_state factory
 │   ├── tools/
-│   │   └── registry.py       # tool scopes per agent role
-│   └── llm.py                # Groq / Ollama factory
+│   │   └── registry.py         tool definitions, scopes per agent role
+│   └── llm.py                  Groq / Ollama factory
 ├── api/
-│   └── azure_main.py         # FastAPI: /tasks, /stream, browser UI
+│   └── azure_main.py           FastAPI endpoints + browser UI
 ├── worker/
-│   └── servicebus_worker.py  # Service Bus consumer, lock renewal
+│   └── servicebus_worker.py    Service Bus consumer, lock renewal, dead-letter
 ├── tests/
-│   ├── unit/                 # routing logic, state schema, worker parsing
-│   └── integration/          # API endpoints, full graph e2e
+│   ├── unit/                   routing, state schema, tools, parsing, worker
+│   └── integration/            API endpoints, full graph end to end
 ├── scripts/
-│   ├── init_db.py            # create Postgres schema
-│   └── smoke_test.py         # mocked end-to-end run
-└── infra/azure/terraform/    # Container Apps, Service Bus, Postgres
+│   ├── demo_incident.py        generates synthetic logs and runs a full investigation
+│   ├── init_db.py              creates the Postgres checkpoint schema
+│   └── smoke_test.py           mocked end-to-end graph run
+└── infra/azure/terraform/      Container Apps, Service Bus, Postgres, Key Vault
 ```

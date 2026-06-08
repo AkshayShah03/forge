@@ -14,26 +14,29 @@ from agent_system.tools.registry import create_tool_registry
 
 logger = logging.getLogger(__name__)
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are an orchestrator agent. Your job is to break a task into subtasks and assign each to a specialist agent.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are an incident response orchestrator. When given an alert or service degradation report, break the investigation into exactly 3 subtasks.
 
 Available agent types:
-- researcher: web search, document retrieval, fact-finding
-- coder: write and execute Python code
-- analyst: SQL queries, data analysis, statistics
+- researcher: searches for known causes of this alert type, similar historical incidents, and relevant runbook patterns
+- coder: reads log files, queries git history, and computes statistics to find the evidence trail
+- analyst: correlates coder evidence with researcher context, ranks root cause hypotheses, and drafts a postmortem
+
+ALWAYS use this 3-subtask plan:
+1. researcher subtask: "Research known causes and patterns for this alert type" (no depends_on)
+2. coder subtask: "Parse logs and query git history to find the evidence trail" (no depends_on)
+3. analyst subtask: "Correlate findings, identify root cause, and draft postmortem" (depends_on both above)
 
 Respond ONLY with a JSON object in this exact format:
 {
   "task_plan": [
     {
-      "subtask": "description of the subtask",
+      "subtask": "description",
       "agent": "researcher|coder|analyst",
       "depends_on": [],
       "status": "pending"
     }
   ]
-}
-
-Keep plans simple: 1-3 subtasks. Each depends_on entry is the exact "subtask" string of a prerequisite."""
+}"""
 
 
 def _extract_task_plan(text: str) -> list[dict]:
