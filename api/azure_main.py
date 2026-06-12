@@ -190,7 +190,14 @@ async def submit_task(req: TaskRequest, request: Request) -> TaskResponse:
             metadata={"user_id": req.user_id, **req.metadata},
         )
         import asyncio
-        asyncio.create_task(factory.run_task(state))
+
+        async def _run_and_log():
+            try:
+                await factory.run_task(state)
+            except Exception:
+                logger.exception("Task %s failed", task_id)
+
+        asyncio.create_task(_run_and_log())
 
     return TaskResponse(task_id=task_id, status="queued", queued_at=queued_at)
 
