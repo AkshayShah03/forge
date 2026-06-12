@@ -51,6 +51,10 @@ def _extract_critic_output(text: str) -> dict:
         try:
             d = json.loads(candidate)
             if isinstance(d, dict) and "passed" in d:
+                fa = d.get("final_answer", "")
+                if not isinstance(fa, str):
+                    fa = json.dumps(fa)
+                d["final_answer"] = fa
                 return d
         except json.JSONDecodeError:
             pass
@@ -107,7 +111,7 @@ async def critic_node(state: AgentState) -> dict:
         "suggestions": output.get("suggestions", []),
     }
 
-    critic_answer = output.get("final_answer", "").strip()
+    critic_answer = str(output.get("final_answer") or "").strip()
 
     # If the critic gave a vague one-liner (< 120 chars and no code),
     # fall back to the most content-rich subtask result instead.
