@@ -38,18 +38,22 @@ TASK_QUEUE_NAME       = os.getenv("AZURE_TASK_QUEUE_NAME",   "task-inbox")
 
 
 def _setup_demo_logs() -> None:
-    """Generate synthetic checkout-service logs so the built-in demo examples work immediately."""
+    """Generate synthetic logs and a git repo so demo examples are fully grounded in real data."""
     import json as _json
     import random as _random
+    import subprocess as _sp
     from datetime import datetime, timezone, timedelta
     from pathlib import Path
 
-    log_dir = Path("/tmp/forge-demo/logs")
+    log_dir  = Path("/tmp/forge-demo/logs")
+    repo_dir = Path("/tmp/forge-demo/repo")
     log_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir.mkdir(parents=True, exist_ok=True)
 
     incident_start = datetime.now(timezone.utc) - timedelta(minutes=45)
     deploy_time    = incident_start - timedelta(minutes=30)
 
+    # --- logs ---
     lines: list[str] = []
     t = datetime.now(timezone.utc) - timedelta(minutes=120)
     endpoints = ["/api/checkout", "/api/cart", "/api/payment"]
@@ -74,7 +78,64 @@ def _setup_demo_logs() -> None:
                      "event": "deploy_completed", "service": "checkout-service",
                      "version": "v2.4.1", "rollout": "100%"}),
     ]))
-    logger.info("Demo logs ready at %s  incident_start=%s", log_dir, incident_start.isoformat())
+
+    # --- git repo with real commits the coder can inspect ---
+    def _git(*args: str, env: dict | None = None) -> None:
+        _sp.run(["git", "-C", str(repo_dir)] + list(args),
+                check=False, capture_output=True,
+                env={**os.environ, **(env or {})})
+
+    _git("init")
+    _git("config", "user.email", "eng@checkout-service.internal")
+    _git("config", "user.name",  "Checkout Engineering")
+
+    # v2.4.0 — healthy baseline committed 2 hours before deploy
+    views_before = '''\
+from django.db import models
+
+def get_order_items(order_id):
+    """Return all items for an order with their product details."""
+    return (
+        models.OrderItem.objects
+        .filter(order_id=order_id)
+        .select_related("product", "product__category")
+    )
+'''
+    (repo_dir / "checkout").mkdir(exist_ok=True)
+    (repo_dir / "checkout" / "views.py").write_text(views_before)
+    (repo_dir / "checkout" / "__init__.py").write_text("")
+    _git("add", ".")
+    baseline_time = (deploy_time - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    _git("commit", "--allow-empty", "-m", "v2.4.0: stable release",
+         env={"GIT_AUTHOR_DATE": baseline_time, "GIT_COMMITTER_DATE": baseline_time,
+              **os.environ})
+
+    # v2.4.1 — the regression: select_related removed during cart refactor
+    views_after = '''\
+from django.db import models
+
+def get_order_items(order_id):
+    """Return all items for an order with their product details."""
+    # Refactored for new cart pipeline — removed select_related to support lazy loading
+    return (
+        models.OrderItem.objects
+        .filter(order_id=order_id)
+    )
+'''
+    (repo_dir / "checkout" / "views.py").write_text(views_after)
+    _git("add", ".")
+    deploy_ts = deploy_time.strftime("%Y-%m-%dT%H:%M:%S")
+    _git("commit", "-m",
+         "v2.4.1: Refactor checkout item loading for new cart pipeline\n\n"
+         "Removes select_related() to support the new lazy-loading cart feature.\n"
+         "Refs: CART-412",
+         env={"GIT_AUTHOR_DATE": deploy_ts, "GIT_COMMITTER_DATE": deploy_ts,
+              **os.environ})
+
+    logger.info(
+        "Demo ready — logs: %s  repo: %s  incident_start: %s",
+        log_dir, repo_dir, incident_start.isoformat(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +495,7 @@ const _now = new Date();
 const _incident = new Date(_now - 45 * 60 * 1000);
 const _deploy   = new Date(_now - 75 * 60 * 1000);
 const EXAMPLES = {
-  latency: `P95 latency in checkout-service jumped from 45ms to 385ms starting at ${_incident.toISOString()}. A deploy (v2.4.1) finished at ${_deploy.toISOString()}. Logs are at /tmp/forge-demo/logs/. Investigate the root cause and write a postmortem.`,
+  latency: `P95 latency in checkout-service jumped from 45ms to 385ms starting at ${_incident.toISOString()}. A deploy (v2.4.1) finished at ${_deploy.toISOString()}. Logs are at /tmp/forge-demo/logs/. The repo is at /tmp/forge-demo/repo. Investigate the root cause and write a postmortem.`,
   error: `Error rate on the payments API spiked from 0.1% to 8.3% at 03:17 UTC. The errors are all 500s with "connection refused" in the logs. The service connects to Redis for session data. Logs are at /var/log/payments/. Investigate and draft a postmortem.`,
   memory: `The recommendation-service pod has been OOMKilled three times in the past two hours. Memory usage climbs steadily from 400MB to 2GB over about 45 minutes before the process is killed. A new feature flag was enabled yesterday. Logs are at /var/log/reco/. Investigate the root cause.`,
   db: `Slow query alerts firing for the user-service database since 09:40. Average query time went from 8ms to 340ms. The user table has 12 million rows. A migration ran this morning that added a new index. Logs are at /var/log/userservice/ and the DB slow query log is at /var/log/postgres/slow.log. Find the root cause.`,
