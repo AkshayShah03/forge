@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: forge
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: PYTHONPATH
+        value: /app
+      - key: QUALITY_THRESHOLD
+        value: "0.75"
+      - key: AGENT_WORKSPACE
+        value: /tmp/agent_workspace
