@@ -37,6 +37,46 @@ SERVICE_BUS_NAMESPACE = os.getenv("AZURE_SERVICE_BUS_NAMESPACE", "")
 TASK_QUEUE_NAME       = os.getenv("AZURE_TASK_QUEUE_NAME",   "task-inbox")
 
 
+def _setup_demo_logs() -> None:
+    """Generate synthetic checkout-service logs so the built-in demo examples work immediately."""
+    import json as _json
+    import random as _random
+    from datetime import datetime, timezone, timedelta
+    from pathlib import Path
+
+    log_dir = Path("/tmp/forge-demo/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    incident_start = datetime.now(timezone.utc) - timedelta(minutes=45)
+    deploy_time    = incident_start - timedelta(minutes=30)
+
+    lines: list[str] = []
+    t = datetime.now(timezone.utc) - timedelta(minutes=120)
+    endpoints = ["/api/checkout", "/api/cart", "/api/payment"]
+    while t < datetime.now(timezone.utc):
+        post = t >= incident_start
+        latency = max(1, int(_random.gauss(385 if post else 45, 60 if post else 8)))
+        db_q    = _random.randint(18, 28) if post else _random.randint(1, 3)
+        lines.append(_json.dumps({
+            "ts": t.isoformat(), "method": "POST",
+            "path": _random.choice(endpoints),
+            "status": 200 if latency < 800 else _random.choice([200, 504]),
+            "latency_ms": latency, "db_queries": db_q,
+        }))
+        t += timedelta(seconds=_random.uniform(0.5, 3.0))
+
+    (log_dir / "checkout-service.log").write_text("\n".join(lines))
+    (log_dir / "deploy.log").write_text("\n".join([
+        _json.dumps({"ts": deploy_time.isoformat(), "event": "deploy_started",
+                     "service": "checkout-service", "version": "v2.4.1",
+                     "commit": "a3f9c12", "author": "eng-team"}),
+        _json.dumps({"ts": (deploy_time + timedelta(seconds=45)).isoformat(),
+                     "event": "deploy_completed", "service": "checkout-service",
+                     "version": "v2.4.1", "rollout": "100%"}),
+    ]))
+    logger.info("Demo logs ready at %s  incident_start=%s", log_dir, incident_start.isoformat())
+
+
 # ---------------------------------------------------------------------------
 # Request / response models — unchanged from AWS version
 # ---------------------------------------------------------------------------
@@ -70,23 +110,30 @@ class TaskStatus(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    credential = DefaultAzureCredential()
-    sb_client  = ServiceBusClient(
-        fully_qualified_namespace=SERVICE_BUS_NAMESPACE,
-        credential=credential,
-    )
+    _setup_demo_logs()
+
     graph_factory = AgentGraphFactory()
     await graph_factory.__aenter__()
+    app.state.factory = graph_factory
 
-    app.state.sb_client    = sb_client
-    app.state.credential   = credential
-    app.state.factory      = graph_factory
-    logger.info("API started — Service Bus namespace: %s", SERVICE_BUS_NAMESPACE)
+    if SERVICE_BUS_NAMESPACE:
+        credential = DefaultAzureCredential()
+        sb_client  = ServiceBusClient(
+            fully_qualified_namespace=SERVICE_BUS_NAMESPACE,
+            credential=credential,
+        )
+        app.state.sb_client  = sb_client
+        app.state.credential = credential
+        logger.info("API started — Service Bus namespace: %s", SERVICE_BUS_NAMESPACE)
+    else:
+        logger.info("API started — local mode (no Service Bus configured)")
+
     yield
 
     await graph_factory.__aexit__(None, None, None)
-    await sb_client.close()
-    await credential.close()
+    if SERVICE_BUS_NAMESPACE and hasattr(app.state, "sb_client"):
+        await app.state.sb_client.close()
+        await app.state.credential.close()
 
 
 app = FastAPI(
@@ -376,8 +423,11 @@ async def ui() -> str:
 </div>
 
 <script>
+const _now = new Date();
+const _incident = new Date(_now - 45 * 60 * 1000);
+const _deploy   = new Date(_now - 75 * 60 * 1000);
 const EXAMPLES = {
-  latency: `P95 latency in checkout-service jumped from 45ms to 385ms starting at 2026-06-08T14:32:00Z. A deploy (v2.4.1) finished at 14:02. Logs are at /tmp/forge-demo/logs/. The repo is at /Users/akshay/Downloads/multi-agent-azure-migration. Investigate the root cause and write a postmortem.`,
+  latency: `P95 latency in checkout-service jumped from 45ms to 385ms starting at ${_incident.toISOString()}. A deploy (v2.4.1) finished at ${_deploy.toISOString()}. Logs are at /tmp/forge-demo/logs/. Investigate the root cause and write a postmortem.`,
   error: `Error rate on the payments API spiked from 0.1% to 8.3% at 03:17 UTC. The errors are all 500s with "connection refused" in the logs. The service connects to Redis for session data. Logs are at /var/log/payments/. Investigate and draft a postmortem.`,
   memory: `The recommendation-service pod has been OOMKilled three times in the past two hours. Memory usage climbs steadily from 400MB to 2GB over about 45 minutes before the process is killed. A new feature flag was enabled yesterday. Logs are at /var/log/reco/. Investigate the root cause.`,
   db: `Slow query alerts firing for the user-service database since 09:40. Average query time went from 8ms to 340ms. The user table has 12 million rows. A migration ran this morning that added a new index. Logs are at /var/log/userservice/ and the DB slow query log is at /var/log/postgres/slow.log. Find the root cause.`,
