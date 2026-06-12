@@ -57,10 +57,12 @@ class TestExtractTaskPlan:
         assert result[2]["depends_on"] == ["research", "code"]
 
     def test_fallback_on_empty_string(self):
-        """Empty string produces a single fallback researcher subtask."""
+        """Empty string produces the default 3-subtask plan."""
         result = _extract_task_plan("")
-        assert len(result) == 1
+        assert len(result) == 3
         assert result[0]["agent"] == "researcher"
+        assert result[1]["agent"] == "coder"
+        assert result[2]["agent"] == "analyst"
 
     def test_fallback_on_garbage_text(self):
         """Non-JSON text falls back to default plan."""

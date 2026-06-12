@@ -1,6 +1,7 @@
 """Researcher, coder, and analyst sub-agents."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -14,48 +15,122 @@ from agent_system.tools.registry import create_tool_registry
 
 logger = logging.getLogger(__name__)
 
+# Maximum steps the ReAct loop can take (LLM call + tool call = 2 steps).
+# Prevents infinite retries when tools are unavailable.
+_REACT_RECURSION_LIMIT = 12
+
+# Per-agent wall-clock timeout in seconds.
+_AGENT_TIMEOUT = 120
+
 ROLE_PROMPTS = {
-    "researcher": """You are an incident response researcher. Given an alert or service degradation description:
-1. Use web_search to find: (a) common root causes for this alert type, (b) known failure patterns for the affected service/component, (c) relevant runbook or postmortem patterns from engineering blogs
-2. Return a ranked list of likely root causes with brief reasoning for each.
-Be specific to the technology mentioned (e.g. if a Python service, mention GIL contention, GC pauses, asyncio event loop blocking).""",
+    "researcher": """\
+You are an incident response researcher. Your only job is to produce a ranked list of root cause hypotheses.
 
-    "coder": """You are an incident investigator. Given an alert with log paths and/or a repository path:
-1. Use list_log_files to discover log files in the incident directory
-2. Use read_log_file to read relevant logs (filter by pattern if the alert mentions a specific error or endpoint)
-3. Use execute_python to parse log lines and compute: error rates, P50/P95/P99 latency, request volume, and timestamp of the anomaly onset
-4. Use query_git_log on the repository path to find deploys in the 2 hours before the anomaly
-5. Return structured findings: {anomaly_start: ISO timestamp, affected_endpoints: [...], stats: {...}, recent_commits: [...]}
-Be precise. Return actual numbers from the logs.""",
+STRICT RULES — follow exactly:
+1. Call web_search at most ONCE. If it returns any error or "unavailable", do NOT call it again.
+2. Do NOT call rag_retrieval or read_file unless you have a specific, known path.
+3. After at most one tool attempt, write your findings using your training knowledge.
+4. Stop immediately after providing your findings — do not add commentary or ask follow-up questions.
 
-    "analyst": """You are a reliability engineer. Given researcher findings (likely causes) and coder findings (evidence from logs and git):
-1. Correlate the anomaly timestamp with recent commits — identify the most likely causal commit
-2. Rank root cause hypotheses by confidence (0–100%) based on the evidence
-3. Draft a complete postmortem with these sections:
+Given the incident description, output:
+## Likely Root Causes (ranked)
+For each cause: name, why it fits this incident, key diagnostic signals, and immediate fix.
+
+Use technology-specific knowledge:
+- Python services: GIL contention, asyncio event loop blocking, GC pauses, connection pool exhaustion
+- Redis: connection pool exhaustion, eviction policy, slow commands (KEYS, SORT), replication lag
+- Databases: N+1 queries, missing indexes, lock contention, autovacuum, connection limits
+- Memory: object retention, circular references, unbounded caches, memory-mapped files
+- Latency: serialization overhead, DNS resolution, TLS handshake, cold starts""",
+
+    "coder": """\
+You are an incident investigator. Extract hard evidence from logs and git history.
+
+STRICT RULES — follow exactly:
+1. Call each tool at most ONCE with a given set of arguments. Never retry the same call.
+2. If list_log_files returns "path does not exist", note it and move to the next step immediately.
+3. After checking all provided paths, write your findings and STOP — do not loop.
+
+INVESTIGATION STEPS (in order):
+1. If a log directory path is mentioned: call list_log_files(path) ONCE.
+   - If files exist: call read_log_file for the most relevant 1-2 files (checkout/service/app logs first).
+   - If path missing: write "Log path <path> not accessible on this host."
+2. If log content was retrieved: call execute_python ONCE to compute:
+   - Error rate (errors / total requests × 100)
+   - P50, P95, P99 latency
+   - DB query count per request (if present)
+   - Exact timestamp where metrics first crossed threshold
+3. If a repo path is mentioned: call query_git_log(repo_path, since_hours=4) ONCE.
+4. STOP and write your structured findings.
+
+Output format:
+- Log status: [accessible with N lines | not accessible]
+- Anomaly onset: [ISO timestamp or "not determinable"]
+- Key statistics: [actual numbers or "logs unavailable"]
+- Recent commits: [list or "no repo provided"]
+- Evidence summary: [2-3 sentences connecting timing to commits/metrics]""",
+
+    "analyst": """\
+You are a reliability engineer writing an incident postmortem.
+
+You receive two sets of findings:
+- Researcher findings: known root cause patterns for this alert type
+- Coder findings: evidence from logs and git history (may be limited if logs were inaccessible)
+
+Your job: correlate the evidence with the patterns and write a complete postmortem.
+
+If coder found real log data: anchor every claim to specific numbers (e.g. "P95 rose from 45ms to 385ms").
+If logs were inaccessible: write the postmortem based on the pattern match, note the data gap, and recommend what logs to check.
+
+OUTPUT — write exactly these sections, in order:
 
 ## Incident Summary
-[one paragraph: what happened, when, impact]
+One paragraph: what failed, when it started, what the user impact was.
 
 ## Timeline
-[bullet list with ISO timestamps: alert fired, anomaly onset, deploy that preceded it, etc.]
+Bullet list with timestamps. Include: alert time, anomaly onset, any deploy or config change that preceded it.
 
 ## Root Cause (confidence: N%)
-[specific: name the commit hash, file, function, or query responsible — not "increased load"]
+One specific sentence naming the cause: a commit hash, a missing index, an exhausted connection pool, a removed ORM clause — not "increased traffic" or "high load".
 
 ## Evidence
-[bullet list: log statistics, query counts, error rates that support the root cause]
+Bullet list of supporting facts: actual log statistics, error rates, latency numbers, query counts, commit message. Quote numbers directly.
 
 ## Action Items
-[3–5 concrete tasks: what to fix, who owns it, when]
+3-5 items, each with: what to do, who owns it (team/role), by when.
 
 ## Prevention
-[how to detect this pattern earlier]
+2-3 specific detection or prevention measures: alerting thresholds, code review checks, load tests.
 
-Be specific. Reference exact log statistics and commit hashes from the coder's output.""",
+Be concise and specific. A recruiter or senior engineer reading this should learn exactly what broke and how to prevent it.""",
 }
 
-SUB_AGENT_PROMPT = """You are a specialist agent. Complete your assigned subtask thoroughly and concisely.
-Return your findings or results as plain text. Be specific and actionable."""
+SUB_AGENT_PROMPT = """\
+You are a specialist agent. Complete your assigned subtask thoroughly.
+Return your findings as plain text. Be specific and actionable.
+Do not retry tools that return errors — use your training knowledge instead."""
+
+
+async def _direct_llm_summary(role: str, subtask: str, user_input: str) -> str:
+    """Fallback: call the LLM directly without tools when the ReAct agent times out."""
+    llm = get_llm(role)
+    prompt = (
+        f"{ROLE_PROMPTS.get(role, SUB_AGENT_PROMPT)}\n\n"
+        f"Incident: {user_input[:800]}\n\n"
+        f"Task: {subtask}\n\n"
+        "NOTE: Tool access is unavailable. Answer using your training knowledge only. "
+        "Be specific about what you would find and why."
+    )
+    try:
+        response = await asyncio.wait_for(
+            llm.ainvoke([HumanMessage(content=prompt)]),
+            timeout=45,
+        )
+        text = response.content if isinstance(response.content, str) else str(response.content)
+        return f"[Tool access unavailable — knowledge-based analysis]\n\n{text}"
+    except Exception as e:
+        logger.exception("Fallback LLM call failed for %s: %s", role, e)
+        return f"[{role} could not complete analysis: {e}]"
 
 
 async def _run_sub_agent(state: AgentState, role: str) -> dict:
@@ -84,35 +159,67 @@ async def _run_sub_agent(state: AgentState, role: str) -> dict:
     llm = get_llm(role)
 
     prior = "\n".join(
-        f"- {r['subtask']}: {r['result'][:200]}"
+        f"- {r['subtask']} ({r['agent']}): {r['result'][:400]}"
         for r in state.get("subtask_results", [])
     )
 
     content = (
         f"{ROLE_PROMPTS.get(role, SUB_AGENT_PROMPT)}\n\n"
-        f"Original task: {state['user_input']}\n\n"
+        f"Incident description: {state['user_input']}\n\n"
         f"Your subtask: {target['subtask']}\n\n"
-        + (f"Prior results:\n{prior}\n\n" if prior else "")
+        + (f"Prior agent findings:\n{prior}\n\n" if prior else "")
     )
 
-    agent = create_react_agent(llm, tools)
-    result = await agent.ainvoke({"messages": [HumanMessage(content=content)]})
-
-    last_msg = result["messages"][-1]
-    result_text = last_msg.content if isinstance(last_msg.content, str) else str(last_msg.content)
-
+    result_text = ""
+    result_messages: list = []
     tokens_used = 0
-    for msg in result["messages"]:
-        meta = getattr(msg, "usage_metadata", None)
-        if meta:
-            tokens_used += meta.get("total_tokens", 0)
 
-    updated_plan = []
-    for s in plan:
-        if s["subtask"] == target["subtask"]:
-            updated_plan.append({**s, "status": "complete"})
-        else:
-            updated_plan.append(s)
+    if tools:
+        agent = create_react_agent(llm, tools)
+        try:
+            result = await asyncio.wait_for(
+                agent.ainvoke(
+                    {"messages": [HumanMessage(content=content)]},
+                    config={"recursion_limit": _REACT_RECURSION_LIMIT},
+                ),
+                timeout=_AGENT_TIMEOUT,
+            )
+            last_msg = result["messages"][-1]
+            result_text = last_msg.content if isinstance(last_msg.content, str) else str(last_msg.content)
+            result_messages = result["messages"]
+            for msg in result_messages:
+                meta = getattr(msg, "usage_metadata", None)
+                if isinstance(meta, dict):
+                    tokens_used += meta.get("total_tokens", 0)
+        except asyncio.TimeoutError:
+            logger.warning("%s timed out after %ds — falling back to direct LLM", role, _AGENT_TIMEOUT)
+            result_text = await _direct_llm_summary(role, target["subtask"], state["user_input"])
+        except Exception as e:
+            logger.exception("%s agent raised an exception: %s", role, e)
+            result_text = await _direct_llm_summary(role, target["subtask"], state["user_input"])
+    else:
+        # No tools (e.g. analyst in some configurations) — direct LLM call
+        try:
+            response = await asyncio.wait_for(
+                llm.ainvoke([HumanMessage(content=content)]),
+                timeout=_AGENT_TIMEOUT,
+            )
+            result_text = response.content if isinstance(response.content, str) else str(response.content)
+            result_messages = [response]
+            usage = getattr(response, "usage_metadata", None)
+            if isinstance(usage, dict):
+                tokens_used = usage.get("total_tokens", 0)
+        except asyncio.TimeoutError:
+            logger.warning("%s direct call timed out", role)
+            result_text = f"[{role} timed out]"
+        except Exception as e:
+            logger.exception("%s direct call failed: %s", role, e)
+            result_text = f"[{role} error: {e}]"
+
+    updated_plan = [
+        {**s, "status": "complete"} if s["subtask"] == target["subtask"] else s
+        for s in plan
+    ]
 
     new_result: SubtaskResult = {
         "subtask": target["subtask"],
@@ -125,7 +232,7 @@ async def _run_sub_agent(state: AgentState, role: str) -> dict:
     return {
         "task_plan": updated_plan,
         "subtask_results": [new_result],
-        "messages": result["messages"],
+        "messages": result_messages,
         "total_tokens_used": state["total_tokens_used"] + tokens_used,
     }
 
