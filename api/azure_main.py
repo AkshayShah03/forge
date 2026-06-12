@@ -334,6 +334,38 @@ async def health() -> dict:
     return {"status": "ok", "service": "multi-agent-api-azure"}
 
 
+@app.get("/demo")
+async def demo_info() -> dict:
+    """Return metadata about the demo data so the UI can show exactly what is being analyzed."""
+    import subprocess as _sp
+    from pathlib import Path
+
+    log_path  = Path("/tmp/forge-demo/logs/checkout-service.log")
+    repo_path = Path("/tmp/forge-demo/repo")
+
+    line_count = len(log_path.read_text().splitlines()) if log_path.exists() else 0
+
+    git_log = ""
+    diff    = ""
+    if repo_path.exists():
+        git_log = _sp.run(
+            ["git", "-C", str(repo_path), "log", "--format=%h %ad %s", "--date=short"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        diff = _sp.run(
+            ["git", "-C", str(repo_path), "show", "HEAD", "-p", "--", "checkout/views.py"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    return {
+        "log_dir":        "/tmp/forge-demo/logs",
+        "repo_dir":       "/tmp/forge-demo/repo",
+        "log_line_count": line_count,
+        "git_log":        git_log,
+        "diff":           diff,
+    }
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def ui() -> str:
     """Browser UI for submitting incident investigations and watching live agent progress."""
@@ -346,23 +378,57 @@ async def ui() -> str:
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #0f1117; color: #e2e8f0; min-height: 100vh; padding: 2rem; max-width: 860px; margin: 0 auto; }
+         background: #0f1117; color: #e2e8f0; min-height: 100vh; padding: 2rem; max-width: 900px; margin: 0 auto; }
   h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.2rem; color: #f8fafc; letter-spacing: -0.01em; }
-  .subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 1.75rem; }
+  .subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 1.25rem; }
   .subtitle a { color: #6366f1; text-decoration: none; }
   .subtitle a:hover { text-decoration: underline; }
 
-  .how-it-works { background: #161b27; border: 1px solid #1e2535; border-radius: 0.6rem;
-                  padding: 1rem 1.25rem; margin-bottom: 1.25rem; font-size: 0.82rem; color: #64748b; line-height: 1.6; }
-  .how-it-works strong { color: #94a3b8; }
-  .pipeline { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
-              margin-top: 0.6rem; font-size: 0.78rem; }
-  .agent-chip { background: #1a2235; border: 1px solid #2a3450;
-                border-radius: 0.35rem; padding: 0.25rem 0.6rem; color: #7dd3fc; font-weight: 500; }
-  .arrow { color: #334155; }
-
   .card { background: #1e2230; border: 1px solid #2d3348; border-radius: 0.75rem;
-          padding: 1.5rem; margin-bottom: 1.25rem; }
+          padding: 1.25rem 1.5rem; margin-bottom: 1.1rem; }
+
+  /* demo data panel */
+  .demo-panel { background: #161b27; border: 1px solid #1e2d1e; border-radius: 0.75rem;
+                margin-bottom: 1.1rem; overflow: hidden; }
+  .demo-panel-header { display: flex; align-items: center; justify-content: space-between;
+                       padding: 0.7rem 1.1rem; cursor: pointer; user-select: none; }
+  .demo-panel-header:hover { background: #1a2230; }
+  .demo-panel-title { font-size: 0.82rem; font-weight: 600; color: #4ade80; display: flex; align-items: center; gap: 0.5rem; }
+  .demo-panel-title::before { content: ""; display: inline-block; width: 7px; height: 7px;
+                               background: #4ade80; border-radius: 50%; }
+  .demo-chevron { color: #475569; font-size: 0.75rem; transition: transform .2s; }
+  .demo-panel-body { padding: 0 1.1rem 1rem; display: none; }
+  .demo-panel-body.open { display: block; }
+
+  .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.85rem; }
+  .demo-box { background: #0f1117; border: 1px solid #1e2535; border-radius: 0.5rem; padding: 0.65rem 0.85rem; }
+  .demo-box-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: .08em;
+                    color: #475569; margin-bottom: 0.3rem; }
+  .demo-box-val { font-family: "SF Mono","Fira Code",monospace; font-size: 0.78rem; color: #7dd3fc; }
+  .demo-box-sub { font-size: 0.72rem; color: #475569; margin-top: 0.2rem; }
+
+  .diff-block { background: #0a0c12; border: 1px solid #1e2535; border-radius: 0.5rem;
+                padding: 0.65rem 0.85rem; font-family: "SF Mono","Fira Code",monospace;
+                font-size: 0.76rem; line-height: 1.7; overflow-x: auto; }
+  .diff-filename { color: #64748b; margin-bottom: 0.4rem; font-size: 0.72rem; }
+  .diff-add { color: #4ade80; }
+  .diff-del { color: #f87171; }
+  .diff-ctx { color: #475569; }
+  .diff-loading { color: #475569; font-style: italic; font-size: 0.78rem; }
+
+  /* live pipeline */
+  .pipeline-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .pipe-step { display: flex; align-items: center; gap: 0.4rem; background: #151b2a;
+               border: 1px solid #2a3450; border-radius: 0.4rem; padding: 0.3rem 0.75rem;
+               font-size: 0.78rem; font-weight: 500; color: #475569; transition: all .3s; }
+  .pipe-step.active { border-color: #6366f1; color: #a5b4fc; background: #1a1f3a; }
+  .pipe-step.done   { border-color: #4ade80; color: #4ade80; background: #0f1f14; }
+  .pipe-arrow { color: #2d3348; font-size: 0.8rem; }
+  .pipe-dot { width: 7px; height: 7px; border-radius: 50%; background: #2d3348; flex-shrink: 0; }
+  .pipe-step.active .pipe-dot { background: #6366f1; animation: pulse 1.2s ease-in-out infinite; }
+  .pipe-step.done   .pipe-dot { background: #4ade80; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
   .examples-label { color: #64748b; font-size: 0.78rem; margin-bottom: 0.5rem; }
   .examples { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.9rem; }
   .example-btn { background: #151b2a; border: 1px solid #2a3450; border-radius: 0.4rem;
@@ -371,52 +437,55 @@ async def ui() -> str:
   .example-btn:hover { border-color: #6366f1; color: #e2e8f0; }
 
   textarea { width: 100%; background: #0f1117; border: 1px solid #2d3348;
-             border-radius: 0.5rem; color: #e2e8f0; font-size: 0.9rem;
-             padding: 0.75rem; resize: vertical; min-height: 100px;
+             border-radius: 0.5rem; color: #e2e8f0; font-size: 0.88rem;
+             padding: 0.75rem; resize: vertical; min-height: 95px;
              outline: none; transition: border-color .2s; line-height: 1.55; }
   textarea:focus { border-color: #6366f1; }
-  .hint { color: #475569; font-size: 0.75rem; margin-top: 0.4rem; }
+  .hint { color: #475569; font-size: 0.73rem; margin-top: 0.35rem; }
 
   .row { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.85rem; }
   label { color: #94a3b8; font-size: 0.82rem; white-space: nowrap; }
   select { background: #0f1117; border: 1px solid #2d3348; border-radius: 0.45rem;
            color: #e2e8f0; padding: 0.4rem 0.6rem; font-size: 0.82rem; }
   button#submit-btn { background: #6366f1; color: #fff; border: none; border-radius: 0.5rem;
-           padding: 0.55rem 1.4rem; font-size: 0.9rem; font-weight: 500;
+           padding: 0.55rem 1.4rem; font-size: 0.88rem; font-weight: 500;
            cursor: pointer; transition: background .15s; margin-left: auto; }
   button#submit-btn:hover:not(:disabled) { background: #4f46e5; }
   button#submit-btn:disabled { opacity: .5; cursor: not-allowed; }
 
-  #log { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.78rem;
-         line-height: 1.7; max-height: 220px; overflow-y: auto;
-         background: #0a0c12; border-radius: 0.5rem; padding: 0.85rem;
-         border: 1px solid #1a1f2e; display: none; }
-  .log-line { display: flex; gap: 0.5rem; }
-  .log-time { color: #475569; flex-shrink: 0; }
-  .log-info  { color: #38bdf8; }
-  .log-done  { color: #34d399; }
-  .log-warn  { color: #fb923c; }
-  .log-err   { color: #f87171; }
+  /* agent outputs — appear live as each agent finishes */
+  #subtasks { margin-bottom: 1.1rem; }
+  .subtasks-label { color: #64748b; font-size: 0.75rem; margin-bottom: 0.5rem; padding-left: 0.1rem; }
+  .subtask { border: 1px solid #2d3348; border-radius: 0.5rem; margin-bottom: 0.6rem; overflow: hidden; }
+  .subtask-header { background: #1a1f2e; padding: 0.4rem 0.85rem;
+                    font-size: 0.76rem; display: flex; gap: 0.75rem; align-items: center; }
+  .subtask-role { color: #7dd3fc; font-weight: 600; text-transform: uppercase;
+                  font-size: 0.67rem; letter-spacing: .07em; }
+  .subtask-name { color: #94a3b8; flex: 1; }
+  .subtask-body { padding: 0.65rem 0.85rem; font-size: 0.78rem; line-height: 1.65;
+                  white-space: pre-wrap; color: #cbd5e1;
+                  font-family: "SF Mono","Fira Code",monospace;
+                  max-height: 260px; overflow-y: auto; background: #0a0c12; }
 
+  /* postmortem */
   #answer { display: none; }
-  #answer h2 { font-size: 0.9rem; color: #94a3b8; margin-bottom: 0.6rem; font-weight: 500; }
-  #answer-text { color: #f1f5f9; line-height: 1.75; white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; }
-  .meta { display: flex; gap: 1.5rem; margin-top: 1rem; font-size: 0.78rem; }
+  #answer h2 { font-size: 0.88rem; color: #94a3b8; margin-bottom: 0.6rem; font-weight: 500; }
+  #answer-text { color: #f1f5f9; line-height: 1.8; white-space: pre-wrap; font-size: 0.88rem; }
+  .meta { display: flex; gap: 1.5rem; margin-top: 1rem; font-size: 0.76rem; flex-wrap: wrap; }
   .meta span { color: #64748b; }
   .meta b { color: #94a3b8; }
 
-  #subtasks { display: none; margin-top: 1.25rem; }
-  .subtasks-label { color: #64748b; font-size: 0.78rem; margin-bottom: 0.5rem; padding-left: 0.1rem; }
-  .subtask { border: 1px solid #2d3348; border-radius: 0.5rem; margin-bottom: 0.75rem; overflow: hidden; }
-  .subtask-header { background: #1a1f2e; padding: 0.45rem 0.85rem;
-                    font-size: 0.78rem; display: flex; gap: 0.75rem; align-items: center; }
-  .subtask-role { color: #7dd3fc; font-weight: 600; text-transform: uppercase;
-                  font-size: 0.68rem; letter-spacing: .06em; }
-  .subtask-name { color: #94a3b8; flex: 1; }
-  .subtask-body { padding: 0.75rem 0.85rem; font-size: 0.8rem; line-height: 1.65;
-                  white-space: pre-wrap; color: #cbd5e1;
-                  font-family: "SF Mono","Fira Code",monospace;
-                  max-height: 280px; overflow-y: auto; background: #0a0c12; }
+  /* activity log */
+  #log { font-family: "SF Mono","Fira Code",monospace; font-size: 0.76rem;
+         line-height: 1.7; max-height: 180px; overflow-y: auto;
+         background: #0a0c12; border-radius: 0.5rem; padding: 0.75rem;
+         border: 1px solid #1a1f2e; display: none; }
+  .log-line { display: flex; gap: 0.5rem; }
+  .log-time { color: #475569; flex-shrink: 0; }
+  .log-info { color: #38bdf8; }
+  .log-done { color: #34d399; }
+  .log-warn { color: #fb923c; }
+  .log-err  { color: #f87171; }
 
   .badge { display: inline-flex; align-items: center; gap: 0.35rem;
            background: #1a2332; border: 1px solid #2d3f55;
@@ -430,17 +499,30 @@ async def ui() -> str:
 </head>
 <body>
 <h1>Forge</h1>
-<p class="subtitle">Incident root cause analyzer &nbsp;&middot;&nbsp; <a href="/docs" target="_blank">API docs</a></p>
+<p class="subtitle">Incident root cause analyzer &nbsp;&middot;&nbsp; <a href="/docs" target="_blank">API docs</a> &nbsp;&middot;&nbsp; <a href="https://github.com/AkshayShah03/forge" target="_blank">GitHub</a></p>
 
-<div class="how-it-works">
-  <strong>How it works:</strong> describe an incident (what broke, when, where the logs are) and Forge spins up a team of agents to investigate it.
-  <div class="pipeline">
-    <span class="agent-chip">Researcher</span><span class="arrow">&#8594;</span>
-    <span class="agent-chip">Coder</span><span class="arrow">&#8594;</span>
-    <span class="agent-chip">Analyst</span><span class="arrow">&#8594;</span>
-    <span class="agent-chip">Critic</span>
+<!-- demo data panel -->
+<div class="demo-panel" id="demo-panel">
+  <div class="demo-panel-header" onclick="toggleDemo()">
+    <span class="demo-panel-title">Demo data — what the agents actually read</span>
+    <span class="demo-chevron" id="demo-chevron">&#9660;</span>
   </div>
-  The researcher looks up known failure patterns. The coder reads the logs and queries git history. The analyst correlates both and writes a postmortem. The critic scores it and re-runs if it's too vague.
+  <div class="demo-panel-body open" id="demo-body">
+    <div class="demo-grid">
+      <div class="demo-box">
+        <div class="demo-box-label">Log files</div>
+        <div class="demo-box-val" id="demo-log-path">/tmp/forge-demo/logs/</div>
+        <div class="demo-box-sub" id="demo-log-lines">loading...</div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-box-label">Git repository</div>
+        <div class="demo-box-val" id="demo-repo-path">/tmp/forge-demo/repo</div>
+        <div class="demo-box-sub" id="demo-git-log">loading...</div>
+      </div>
+    </div>
+    <div class="diff-filename">checkout/views.py &mdash; what changed in v2.4.1 (the coder reads this file)</div>
+    <div class="diff-block" id="demo-diff"><span class="diff-loading">loading diff...</span></div>
+  </div>
 </div>
 
 <div class="card">
@@ -452,7 +534,7 @@ async def ui() -> str:
     <button class="example-btn" onclick="loadExample('db')">Slow database queries</button>
   </div>
   <textarea id="input" placeholder="Describe the incident: what broke, when it started, where the logs are, and which service is affected..."></textarea>
-  <p class="hint">Tip: include the log directory path and repo path for the best results. Cmd+Enter to submit.</p>
+  <p class="hint">The P95 latency example uses the real logs and git repo above. Cmd+Enter to submit.</p>
   <div class="row">
     <label>Max retries</label>
     <select id="max-iter">
@@ -470,6 +552,25 @@ async def ui() -> str:
   </div>
 </div>
 
+<!-- live pipeline — updates as agents complete -->
+<div class="pipeline-row" id="pipeline" style="display:none">
+  <div class="pipe-step" id="ps-orchestrator"><span class="pipe-dot"></span>Orchestrator</div>
+  <span class="pipe-arrow">&#8594;</span>
+  <div class="pipe-step" id="ps-researcher"><span class="pipe-dot"></span>Researcher</div>
+  <span class="pipe-arrow">&#8594;</span>
+  <div class="pipe-step" id="ps-coder"><span class="pipe-dot"></span>Coder</div>
+  <span class="pipe-arrow">&#8594;</span>
+  <div class="pipe-step" id="ps-analyst"><span class="pipe-dot"></span>Analyst</div>
+  <span class="pipe-arrow">&#8594;</span>
+  <div class="pipe-step" id="ps-critic"><span class="pipe-dot"></span>Critic</div>
+</div>
+
+<!-- agent outputs appear here live as each agent finishes -->
+<div id="subtasks">
+  <div class="subtasks-label" id="subtasks-label" style="display:none">Agent outputs (live)</div>
+  <div id="subtasks-list"></div>
+</div>
+
 <div class="card" id="answer">
   <h2>Postmortem</h2>
   <div id="answer-text"></div>
@@ -480,31 +581,87 @@ async def ui() -> str:
   </div>
 </div>
 
-<div id="subtasks">
-  <div class="subtasks-label">Agent outputs</div>
-  <div id="subtasks-list"></div>
-</div>
-
-<div class="card" style="padding:0.75rem 1rem;">
+<div class="card" style="padding:0.65rem 1rem;">
   <div id="log"></div>
-  <div id="log-empty" style="color:#475569;font-size:0.82rem;">Agent steps will appear here once you start an investigation.</div>
+  <div id="log-empty" style="color:#475569;font-size:0.8rem;">Activity log appears here when an investigation is running.</div>
 </div>
 
 <script>
+// ── demo data panel ──────────────────────────────────────────────────────────
+async function loadDemoInfo() {
+  try {
+    const d = await fetch('/demo').then(r => r.json());
+    document.getElementById('demo-log-path').textContent = d.log_dir + '/';
+    document.getElementById('demo-log-lines').textContent =
+      d.log_line_count.toLocaleString() + ' log lines — generated at startup';
+    document.getElementById('demo-repo-path').textContent = d.repo_dir;
+    document.getElementById('demo-git-log').textContent =
+      d.git_log ? d.git_log.split('\\n').join('  |  ') : 'no commits';
+    if (d.diff) {
+      const html = d.diff.split('\\n').map(line => {
+        if (line.startsWith('+++') || line.startsWith('---')) return `<span class="diff-ctx">${escHtml(line)}</span>`;
+        if (line.startsWith('+')) return `<span class="diff-add">${escHtml(line)}</span>`;
+        if (line.startsWith('-')) return `<span class="diff-del">${escHtml(line)}</span>`;
+        if (line.startsWith('@@')) return `<span class="diff-ctx" style="color:#7dd3fc">${escHtml(line)}</span>`;
+        return `<span class="diff-ctx">${escHtml(line)}</span>`;
+      }).join('\\n');
+      document.getElementById('demo-diff').innerHTML = html;
+    }
+  } catch(e) {
+    document.getElementById('demo-diff').innerHTML = '<span class="diff-loading">Could not load demo info</span>';
+  }
+}
+
+function toggleDemo() {
+  const body = document.getElementById('demo-body');
+  const chev = document.getElementById('demo-chevron');
+  body.classList.toggle('open');
+  chev.style.transform = body.classList.contains('open') ? '' : 'rotate(-90deg)';
+}
+
+// ── live pipeline state ───────────────────────────────────────────────────────
+const AGENT_ORDER = ['orchestrator','researcher','coder','analyst','critic'];
+
+function setPipeState(doneAgents, activeAgent) {
+  AGENT_ORDER.forEach(a => {
+    const el = document.getElementById('ps-' + a);
+    el.classList.remove('active','done');
+    if (doneAgents.includes(a)) el.classList.add('done');
+    else if (a === activeAgent)  el.classList.add('active');
+  });
+}
+
+function inferPipeState(subtaskResults, isDone) {
+  const doneAgents = ['orchestrator']; // orchestrator always done once we have a plan
+  const roles = (subtaskResults || []).map(r => r.agent);
+  roles.forEach(r => { if (!doneAgents.includes(r)) doneAgents.push(r); });
+
+  if (isDone) {
+    setPipeState([...doneAgents, 'critic'], null);
+    return;
+  }
+  // infer what's currently running based on what's done
+  const remaining = AGENT_ORDER.filter(a => !doneAgents.includes(a));
+  const active = remaining[0] || null;
+  setPipeState(doneAgents, active);
+}
+
+// ── examples ─────────────────────────────────────────────────────────────────
 const _now = new Date();
 const _incident = new Date(_now - 45 * 60 * 1000);
 const _deploy   = new Date(_now - 75 * 60 * 1000);
 const EXAMPLES = {
   latency: `P95 latency in checkout-service jumped from 45ms to 385ms starting at ${_incident.toISOString()}. A deploy (v2.4.1) finished at ${_deploy.toISOString()}. Logs are at /tmp/forge-demo/logs/. The repo is at /tmp/forge-demo/repo. Investigate the root cause and write a postmortem.`,
-  error: `Error rate on the payments API spiked from 0.1% to 8.3% at 03:17 UTC. The errors are all 500s with "connection refused" in the logs. The service connects to Redis for session data. Logs are at /var/log/payments/. Investigate and draft a postmortem.`,
-  memory: `The recommendation-service pod has been OOMKilled three times in the past two hours. Memory usage climbs steadily from 400MB to 2GB over about 45 minutes before the process is killed. A new feature flag was enabled yesterday. Logs are at /var/log/reco/. Investigate the root cause.`,
-  db: `Slow query alerts firing for the user-service database since 09:40. Average query time went from 8ms to 340ms. The user table has 12 million rows. A migration ran this morning that added a new index. Logs are at /var/log/userservice/ and the DB slow query log is at /var/log/postgres/slow.log. Find the root cause.`,
+  error: `Error rate on the payments API spiked from 0.1% to 8.3% at 03:17 UTC. Errors are all 500s with "connection refused". The service connects to Redis for session data. Investigate and draft a postmortem.`,
+  memory: `The recommendation-service pod has been OOMKilled three times in the past two hours. Memory climbs from 400MB to 2GB over 45 minutes. A new feature flag was enabled yesterday. Investigate the root cause.`,
+  db: `Slow query alerts firing for user-service since 09:40. Average query time went from 8ms to 340ms. The user table has 12 million rows. A migration ran this morning that added a new index. Find the root cause.`,
 };
 
 function loadExample(key) {
   document.getElementById('input').value = EXAMPLES[key];
 }
 
+// ── logging ──────────────────────────────────────────────────────────────────
 let evtSource = null;
 
 function ts() {
@@ -513,9 +670,8 @@ function ts() {
 
 function addLog(msg, cls='log-info') {
   const log = document.getElementById('log');
-  const empty = document.getElementById('log-empty');
+  document.getElementById('log-empty').style.display = 'none';
   log.style.display = 'block';
-  empty.style.display = 'none';
   const line = document.createElement('div');
   line.className = 'log-line';
   line.innerHTML = `<span class="log-time">${ts()}</span><span class="${cls}">${msg}</span>`;
@@ -523,6 +679,34 @@ function addLog(msg, cls='log-info') {
   log.scrollTop = log.scrollHeight;
 }
 
+// ── subtask rendering (live, called during polling) ───────────────────────────
+let _renderedCount = 0;
+
+function renderSubtasksLive(results) {
+  if (!results || results.length === 0) return;
+  const list = document.getElementById('subtasks-list');
+  document.getElementById('subtasks-label').style.display = '';
+  for (let i = _renderedCount; i < results.length; i++) {
+    const r = results[i];
+    const el = document.createElement('div');
+    el.className = 'subtask';
+    el.innerHTML = `
+      <div class="subtask-header">
+        <span class="subtask-role">${r.agent}</span>
+        <span class="subtask-name">${escHtml(r.subtask)}</span>
+      </div>
+      <div class="subtask-body">${escHtml(r.result || '')}</div>`;
+    list.appendChild(el);
+    addLog(`${r.agent} finished: ${r.subtask.slice(0,60)}...`, 'log-done');
+  }
+  _renderedCount = results.length;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── main submit ──────────────────────────────────────────────────────────────
 async function submitTask() {
   const input = document.getElementById('input').value.trim();
   if (!input) return;
@@ -535,10 +719,13 @@ async function submitTask() {
   document.getElementById('log').style.display = 'none';
   document.getElementById('log-empty').style.display = '';
   document.getElementById('answer').style.display = 'none';
-  document.getElementById('subtasks').style.display = 'none';
   document.getElementById('subtasks-list').innerHTML = '';
+  document.getElementById('subtasks-label').style.display = 'none';
+  document.getElementById('pipeline').style.display = 'flex';
+  _renderedCount = 0;
   if (evtSource) { evtSource.close(); evtSource = null; }
 
+  setPipeState([], 'orchestrator');
   addLog('Submitting incident to Forge...');
 
   const resp = await fetch('/tasks', {
@@ -559,79 +746,62 @@ async function submitTask() {
   }
 
   const {task_id} = await resp.json();
-  addLog(`Task <span class="badge">${task_id.slice(0,8)}&hellip;</span> queued &mdash; agents starting...`);
+  addLog(`Task <span class="badge">${task_id.slice(0,8)}&hellip;</span> queued — orchestrator planning subtasks...`);
 
+  // SSE for completion signal
   evtSource = new EventSource(`/tasks/${task_id}/stream`);
-
-  evtSource.addEventListener('update', e => {
-    const d = JSON.parse(e.data);
-    addLog(`Iteration ${d.iteration} running...`);
-  });
-
-  evtSource.addEventListener('complete', e => {
-    const d = JSON.parse(e.data);
+  evtSource.addEventListener('complete', async e => {
     evtSource.close();
+    const s = await fetch(`/tasks/${task_id}`).then(r => r.json());
+    renderSubtasksLive(s.subtask_results || []);
+    inferPipeState(s.subtask_results, true);
     addLog('Investigation complete', 'log-done');
     btn.disabled = false; btn.innerHTML = 'Investigate';
-
-    fetch(`/tasks/${task_id}`)
-      .then(r => r.json())
-      .then(s => {
-        document.getElementById('answer').style.display = 'block';
-        document.getElementById('answer-text').textContent = s.final_answer || d.final_answer || '(no answer)';
-        const score = s.score ?? d.score;
-        document.getElementById('meta-score').textContent = score != null ? score.toFixed(2) : '—';
-        document.getElementById('meta-iter').textContent = s.iterations ?? '—';
-        document.getElementById('meta-tokens').textContent = s.tokens_used != null ? s.tokens_used.toLocaleString() : '—';
-        renderSubtasks(s.subtask_results || []);
-      });
+    document.getElementById('answer').style.display = 'block';
+    document.getElementById('answer-text').textContent = s.final_answer || '(no answer)';
+    const score = s.score ?? JSON.parse(e.data).score;
+    document.getElementById('meta-score').textContent = score != null ? Number(score).toFixed(2) : '—';
+    document.getElementById('meta-iter').textContent = s.iterations ?? '—';
+    document.getElementById('meta-tokens').textContent = s.tokens_used != null ? s.tokens_used.toLocaleString() : '—';
   });
-
   evtSource.addEventListener('error', () => {
     addLog('Stream dropped, switching to polling...', 'log-warn');
     evtSource.close();
     pollUntilDone(task_id, btn);
   });
-}
 
-function renderSubtasks(results) {
-  if (!results || results.length === 0) return;
-  const list = document.getElementById('subtasks-list');
-  list.innerHTML = '';
-  results.forEach(r => {
-    const el = document.createElement('div');
-    el.className = 'subtask';
-    el.innerHTML = `
-      <div class="subtask-header">
-        <span class="subtask-role">${r.agent}</span>
-        <span class="subtask-name">${r.subtask}</span>
-      </div>
-      <div class="subtask-body">${escHtml(r.result || '')}</div>`;
-    list.appendChild(el);
-  });
-  document.getElementById('subtasks').style.display = 'block';
-}
+  // live polling every 3s to show subtask results as they appear
+  const pollInterval = setInterval(async () => {
+    try {
+      const s = await fetch(`/tasks/${task_id}`).then(r => r.json());
+      renderSubtasksLive(s.subtask_results || []);
+      inferPipeState(s.subtask_results, s.status === 'complete');
+      if (s.status === 'complete') clearInterval(pollInterval);
+    } catch(_) {}
+  }, 3000);
 
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // clear poll interval on completion too
+  evtSource.addEventListener('complete', () => clearInterval(pollInterval));
 }
 
 async function pollUntilDone(task_id, btn) {
   for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 4000));
-    const r = await fetch(`/tasks/${task_id}`);
-    const d = await r.json();
-    if (d.status === 'complete') {
-      addLog('Investigation complete', 'log-done');
-      btn.disabled = false; btn.innerHTML = 'Investigate';
-      document.getElementById('answer').style.display = 'block';
-      document.getElementById('answer-text').textContent = d.final_answer || '(no answer)';
-      document.getElementById('meta-score').textContent = d.score?.toFixed(2) ?? '—';
-      document.getElementById('meta-iter').textContent = d.iterations ?? '—';
-      document.getElementById('meta-tokens').textContent = d.tokens_used?.toLocaleString() ?? '—';
-      renderSubtasks(d.subtask_results || []);
-      return;
-    }
+    try {
+      const s = await fetch(`/tasks/${task_id}`).then(r => r.json());
+      renderSubtasksLive(s.subtask_results || []);
+      inferPipeState(s.subtask_results, s.status === 'complete');
+      if (s.status === 'complete') {
+        addLog('Investigation complete', 'log-done');
+        btn.disabled = false; btn.innerHTML = 'Investigate';
+        document.getElementById('answer').style.display = 'block';
+        document.getElementById('answer-text').textContent = s.final_answer || '(no answer)';
+        document.getElementById('meta-score').textContent = s.score?.toFixed(2) ?? '—';
+        document.getElementById('meta-iter').textContent = s.iterations ?? '—';
+        document.getElementById('meta-tokens').textContent = s.tokens_used?.toLocaleString() ?? '—';
+        return;
+      }
+    } catch(_) {}
     if (i % 3 === 2) addLog(`Still running... (${(i+1)*4}s elapsed)`);
   }
   addLog('Timed out after 4 minutes', 'log-err');
@@ -641,6 +811,8 @@ async function pollUntilDone(task_id, btn) {
 document.getElementById('input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitTask();
 });
+
+loadDemoInfo();
 </script>
 </body>
 </html>"""
